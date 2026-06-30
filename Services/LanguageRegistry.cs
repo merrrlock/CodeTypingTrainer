@@ -1,4 +1,5 @@
 ﻿using CodeTypingTrainer.Services.LanguageRules;
+using System.Collections.Generic;
 
 namespace CodeTypingTrainer.Services
 {

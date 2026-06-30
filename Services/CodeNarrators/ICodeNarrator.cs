@@ -1,4 +1,5 @@
-﻿using CodeTypingTrainer.Models;
+﻿using System.Collections.Generic;
+using CodeTypingTrainer.Models;
 
 namespace CodeTypingTrainer.Services.CodeNarrators
 {

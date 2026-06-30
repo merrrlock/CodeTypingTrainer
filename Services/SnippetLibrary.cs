@@ -1,4 +1,6 @@
 ﻿using CodeTypingTrainer.Models;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace CodeTypingTrainer.Services
 {
@@ -36,7 +38,7 @@ namespace CodeTypingTrainer.Services
 
         private List<CodeSnippet> LoadBuiltInSnippets()
         {
-            return new List<CodeSnippet>
+            var snippets = new List<CodeSnippet>
             {
                 new CodeSnippet
                 {
@@ -165,6 +167,11 @@ vector<int> mergeSorted(vector<int>& a, vector<int>& b) {
 }"
                 }
             };
+
+            foreach (var snippet in snippets)
+                snippet.Code = snippet.Code.Replace("\r\n", "\n").Replace("\r", "\n");
+
+            return snippets;
         }
     }
 }

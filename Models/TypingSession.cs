@@ -1,68 +1,40 @@
-﻿namespace CodeTypingTrainer.Models
-{
-    public enum AccuracyMode
-    {
-        Cumulative,   // Накопительный — ошибки не прощаются
-        CurrentState  // По текущему состоянию — исправил = точность вернулась
-    }
+﻿using System;
+using System.Collections.Generic;
 
+namespace CodeTypingTrainer.Models
+{
     public class TypingSession
     {
-
-
-        // Количество символов автоматически вставленных программой
-        // (закрывающие скобки, отступы после Enter)
-        // Вычитается при сравнении с эталоном
-        public int AutoInsertedChars { get; set; } = 0;
-
-
-
-        // Текущая позиция курсора в InputBox — для мягкого режима точности
-        public int CaretPosition { get; set; } = 0;
         public CodeSnippet Snippet { get; set; }
         public DateTime StartTime { get; set; }
         public bool IsActive { get; set; }
         public bool IsPaused { get; set; }
 
-        // Режим подсчёта точности
-        public AccuracyMode AccuracyMode { get; set; } = AccuracyMode.CurrentState;
-
-        // Накопительный счётчик (строгий режим)
         public int TotalKeystrokes { get; set; }
-        public int CumulativeErrors { get; set; }
 
-        // Для мягкого режима — храним текущий ввод
+        // Позиции в эталоне, на которых хотя бы раз была допущена ошибка.
+        // Используем HashSet — позиция добавляется один раз и навсегда остаётся учтённой,
+        // даже если пользователь потом исправил символ на этом месте.
+        public HashSet<int> ErrorPositions { get; set; } = new();
+
+        public int CumulativeErrors => ErrorPositions.Count;
+
         public string CurrentInput { get; set; } = "";
+        public int CaretPosition { get; set; } = 0;
 
-        // Словарь ошибок: символ → количество раз ошибся
         public Dictionary<char, int> CharErrors { get; set; } = new();
 
-        // Точность — зависит от выбранного режима
         public double Accuracy
         {
             get
             {
-                if (AccuracyMode == AccuracyMode.Cumulative)
-                {
-                    if (TotalKeystrokes == 0) return 100.0;
-                    double correct = TotalKeystrokes - CumulativeErrors;
-                    return Math.Round((correct / TotalKeystrokes) * 100, 1);
-                }
-                else
-                {
-                    // Мягкий режим — сравниваем только введённую часть
-                    // CurrentInput и CaretPosition обновляются из MainWindow
-                    if (CaretPosition == 0) return 100.0;
-                    string target = Snippet?.Code ?? "";
-                    int correct = 0;
-                    for (int i = 0; i < CaretPosition && i < CurrentInput.Length && i < target.Length; i++)
-                        if (CurrentInput[i] == target[i]) correct++;
-                    return Math.Round((double)correct / CaretPosition * 100, 1);
-                }
+                if (TotalKeystrokes == 0) return 100.0;
+                double correct = TotalKeystrokes - CumulativeErrors;
+                if (correct < 0) correct = 0;
+                return Math.Round((correct / TotalKeystrokes) * 100, 1);
             }
         }
 
-        // WPM считается по введённым символам
         public int WPM
         {
             get
@@ -70,20 +42,23 @@
                 if (!IsActive) return 0;
                 double minutes = (DateTime.Now - StartTime).TotalMinutes;
                 if (minutes <= 0.001) return 0;
-                int chars = AccuracyMode == AccuracyMode.Cumulative
-                    ? TotalKeystrokes
-                    : CurrentInput.Length;
-                return (int)(chars / 5.0 / minutes);
+                return (int)(CaretPosition / 5.0 / minutes);
             }
         }
 
-        // Записать ошибку на конкретный символ
-        public void RegisterError(char expectedChar)
+        // Регистрирует ошибку на конкретной позиции эталона.
+        // Если позиция уже была отмечена ранее — ничего не меняется (не дублируем).
+        public void RegisterErrorAtPosition(int position, char expectedChar)
         {
-            if (CharErrors.ContainsKey(expectedChar))
-                CharErrors[expectedChar]++;
-            else
-                CharErrors[expectedChar] = 1;
+            if (ErrorPositions.Add(position))
+            {
+                // Add() возвращает true только если элемент был новым —
+                // значит в CharErrors тоже добавляем только при первой ошибке на этой позиции
+                if (CharErrors.ContainsKey(expectedChar))
+                    CharErrors[expectedChar]++;
+                else
+                    CharErrors[expectedChar] = 1;
+            }
         }
     }
 }

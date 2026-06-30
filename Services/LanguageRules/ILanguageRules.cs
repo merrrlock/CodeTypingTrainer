@@ -1,4 +1,6 @@
-﻿namespace CodeTypingTrainer.Services.LanguageRules
+﻿using System.Collections.Generic;
+
+namespace CodeTypingTrainer.Services.LanguageRules
 {
     // Контракт, который обязан реализовать каждый язык
     public interface ILanguageRules

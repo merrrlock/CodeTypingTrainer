@@ -1,17 +1,37 @@
 ﻿using CodeTypingTrainer.Models;
 using CodeTypingTrainer.Services;
 using CodeTypingTrainer.Services.CodeNarrators;
+using System;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Shapes;
 using System.Windows.Threading;
 
 namespace CodeTypingTrainer
 {
     public partial class MainWindow : Window
     {
-        private ConfigService _config;
+        private readonly StatsAggregationService _statsAggregator = new();
+        private readonly KeyboardLayoutService _keyboardLayout = new();
+        private bool _sidePanelCollapsed = false;
+
+        private Services.SpecialKeyType? _lastHighlightedSpecial;
+
+
+
+
+
+        private readonly OnScreenKeyboardService _onScreenKeyboard = new();
+        private readonly DispatcherTimer _keyReleaseTimer = new() { Interval = TimeSpan.FromMilliseconds(150) };
+        private char? _lastHighlightedKey;
+
+        private readonly StorageService _storage = new();
+        private UserProfile _profile;
+
+        private readonly ConfigService _config = new();
         private readonly GoogleTtsService _googleTts;
 
         private readonly SpeechService _speech = new();
@@ -32,7 +52,6 @@ namespace CodeTypingTrainer
         private readonly AutoCompleteService _autoComplete;
         private TypingSession _session;
 
-        private AccuracyMode _accuracyMode = AccuracyMode.CurrentState;
         private bool _autoCompleteEnabled = true;
         private bool _suggestionsEnabled = true;
         private string _currentLanguage = "Python";
@@ -43,44 +62,63 @@ namespace CodeTypingTrainer
         };
 
         public MainWindow()
-{
-    InitializeComponent();
-    _autoComplete = new AutoCompleteService(_languageRegistry);
+        {
+            InitializeComponent();
 
-    try
-    {
-        _config = new ConfigService();
-        _googleTts = new GoogleTtsService(_config.GetGoogleTtsApiKey());
-    }
-    catch (Exception ex)
-    {
-        MessageBox.Show(
-            $"Не удалось загрузить конфигурацию озвучки:\n{ex.Message}\n\nРежим «На слух» будет недоступен.",
-            "Ошибка конфигурации",
-            MessageBoxButton.OK,
-            MessageBoxImage.Warning);
-    }
+            _onScreenKeyboard.BuildKeyboard(OnScreenKeyboardCanvas);
+            _keyReleaseTimer.Tick += (s, e) =>
+            {
+                if (_lastHighlightedKey.HasValue)
+                {
+                    _onScreenKeyboard.ResetKey(_lastHighlightedKey.Value);
+                    _lastHighlightedKey = null;
+                }
+                if (_lastHighlightedSpecial.HasValue)
+                {
+                    _onScreenKeyboard.ResetSpecial(_lastHighlightedSpecial.Value);
+                    _lastHighlightedSpecial = null;
+                }
+                _keyReleaseTimer.Stop();
+            };
 
-    _timer.Tick += Timer_Tick;
-}
+            _autoComplete = new AutoCompleteService(_languageRegistry);
+
+            _profile = _storage.LoadProfile();
+
+            try
+            {
+                _config = new ConfigService();
+                _googleTts = new GoogleTtsService(_config.GetGoogleTtsApiKey());
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    $"Не удалось загрузить конфигурацию озвучки:\n{ex.Message}\n\nРежим «На слух» будет недоступен.",
+                    "Ошибка конфигурации",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
+
+            _timer.Tick += Timer_Tick;
+        }
 
         // -------------------------------------------------------
         // СТАРТ
         // -------------------------------------------------------
+
+
         private void StartButton_Click(object sender, RoutedEventArgs e)
         {
             _currentLanguage = (LanguageCombo.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "Python";
 
             if (_isAudioMode && !_narrators.IsSupported(_currentLanguage))
             {
-                StatusText.Text = $"Режим «На слух» пока не поддерживает {_currentLanguage}. Выберите Python.";
                 return;
             }
 
             var snippet = _library.GetRandom(_currentLanguage);
             if (snippet == null)
             {
-                StatusText.Text = "Фрагменты не найдены.";
                 return;
             }
 
@@ -89,7 +127,6 @@ namespace CodeTypingTrainer
                 Snippet = snippet,
                 StartTime = DateTime.Now,
                 IsActive = true,
-                AccuracyMode = _accuracyMode
             };
 
             _userInput = "";
@@ -110,11 +147,6 @@ namespace CodeTypingTrainer
                 CodeDisplay.Text = null;
                 _highlight.SetPending(CodeDisplay, snippet.Code);
             }
-
-            _timer.Start();
-            StatusText.Text = _isAudioMode
-                ? $"Слушайте и печатайте: {snippet.Title}"
-                : $"Набираем: {snippet.Title}  |  {snippet.Language}  |  {snippet.Difficulty}";
         }
 
         // -------------------------------------------------------
@@ -165,14 +197,7 @@ namespace CodeTypingTrainer
 
         private async System.Threading.Tasks.Task PlayPhraseAsync(string phrase)
         {
-            StatusText.Text = "🔊 Озвучиваю...";
             var (audioData, error) = await _googleTts.SynthesizeAsync(phrase);
-
-            if (error != null)
-            {
-                StatusText.Text = $"Ошибка озвучки: {error}";
-                return;
-            }
 
             byte[] wavData = AddWavHeader(audioData, 24000, 1, 16);
             string tempPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "tts_segment.wav");
@@ -181,7 +206,6 @@ namespace CodeTypingTrainer
             var player = new System.Media.SoundPlayer(tempPath);
             player.Play();
 
-            StatusText.Text = $"Печатайте: \"{_currentSegments[_currentSegmentIndex].Code.Trim()}\"";
         }
 
         private void ReplayLineButton_Click(object sender, RoutedEventArgs e)
@@ -273,7 +297,7 @@ namespace CodeTypingTrainer
                         // Определяем отступ текущей строки
                         int lineStart = text.LastIndexOf('\n', Math.Max(0, caret - 1)) + 1;
                         string currentLine = text.Substring(lineStart, caret - lineStart);
-
+                       
                         int indent = 0;
                         foreach (char c in currentLine)
                         {
@@ -303,28 +327,26 @@ namespace CodeTypingTrainer
                             string input = InputBox.Text;
                             caret = InputBox.CaretIndex;
 
-                            _session.CurrentInput = input;
-                            _session.CaretPosition = caret;
+                            _userInput = input.Substring(0, Math.Min(caret, input.Length));
+
+                            _session.CurrentInput = _userInput;
+                            _session.CaretPosition = _userInput.Length;
+                            _session.TotalKeystrokes = _userInput.Length;
 
                             string target = _session.Snippet.Code;
-                            string userTyped = input.Substring(0, Math.Min(caret, input.Length));
 
-                            if (_session.AccuracyMode == AccuracyMode.Cumulative)
+                            int errors = 0;
+                            for (int i = 0; i < _userInput.Length && i < target.Length; i++)
+                                if (_userInput[i] != target[i]) errors++;
+
+                            for (int i = 0; i < _userInput.Length && i < target.Length; i++)
                             {
-                                _session.TotalKeystrokes = userTyped.Length;
-                                int errors = 0;
-                                for (int i = 0; i < userTyped.Length && i < target.Length; i++)
-                                    if (userTyped[i] != target[i]) errors++;
-                                if (errors > _session.CumulativeErrors)
-                                {
-                                    if (userTyped.Length <= target.Length)
-                                        _session.RegisterError(target[userTyped.Length - 1]);
-                                    _session.CumulativeErrors = errors;
-                                }
+                                if (_userInput[i] != target[i])
+                                    _session.RegisterErrorAtPosition(i, target[i]);
                             }
 
                             AccuracyText.Text = $"{_session.Accuracy}%";
-                            _highlight.UpdateHighlight(CodeDisplay, target, input, caret);
+                            _highlight.UpdateHighlight(CodeDisplay, target, _userInput, caret);
                             ScrollToCurrentPosition(caret);
                         }
 
@@ -398,7 +420,6 @@ namespace CodeTypingTrainer
 
                 // Минус один: закрывающую } из автопары тоже убираем из счётчика
                 // (она уже была посчитана в HandleAutoPair)
-                if (_session != null) _session.AutoInsertedChars--;
 
                 insertion = $"\n{inner}\n{outer}}}";
 
@@ -461,7 +482,6 @@ namespace CodeTypingTrainer
                 InputBox.TextChanged += InputBox_TextChanged;
             }
 
-            if (_session != null) _session.AutoInsertedChars += autoInserted;
 
             e.Handled = true;
 
@@ -471,33 +491,30 @@ namespace CodeTypingTrainer
                 string input = InputBox.Text;
                 int caret = InputBox.CaretIndex;
 
-                // После Enter автовставленных символов после курсора нет —
-                // курсор стоит в конце введённого, всё до него введено пользователем
                 _userInput = input.Substring(0, Math.Min(caret, input.Length));
 
                 _session.CurrentInput = _userInput;
                 _session.CaretPosition = _userInput.Length;
+                _session.TotalKeystrokes = _userInput.Length;
 
                 string target = _session.Snippet.Code;
 
-                if (_session.AccuracyMode == AccuracyMode.Cumulative)
+                int errors = 0;
+                for (int i = 0; i < _userInput.Length && i < target.Length; i++)
+                    if (_userInput[i] != target[i]) errors++;
+
+                for (int i = 0; i < _userInput.Length && i < target.Length; i++)
                 {
-                    _session.TotalKeystrokes = _userInput.Length;
-                    int errors = 0;
-                    for (int i = 0; i < _userInput.Length && i < target.Length; i++)
-                        if (_userInput[i] != target[i]) errors++;
-                    if (errors > _session.CumulativeErrors)
-                    {
-                        if (_userInput.Length <= target.Length)
-                            _session.RegisterError(target[_userInput.Length - 1]);
-                        _session.CumulativeErrors = errors;
-                    }
+                    if (_userInput[i] != target[i])
+                        _session.RegisterErrorAtPosition(i, target[i]);
                 }
 
                 AccuracyText.Text = $"{_session.Accuracy}%";
                 _highlight.UpdateHighlight(CodeDisplay, target, _userInput, _userInput.Length);
                 ScrollToCurrentPosition(_userInput.Length);
             }
+
+            UpdateKeyboardHint();
         }
 
         // -------------------------------------------------------
@@ -505,6 +522,11 @@ namespace CodeTypingTrainer
         // -------------------------------------------------------
         private void HandleBackspaceKey(KeyEventArgs e)
         {
+            _onScreenKeyboard.HighlightSpecial(Services.SpecialKeyType.Backspace);
+            _lastHighlightedSpecial = Services.SpecialKeyType.Backspace;
+            _keyReleaseTimer.Stop();
+            _keyReleaseTimer.Start();
+
             int caret = InputBox.CaretIndex;
             string text = InputBox.Text;
 
@@ -583,8 +605,8 @@ namespace CodeTypingTrainer
             char? pressed = e.Key switch
             {
                 Key.D0 when shift => ')',   // Shift+0 = )
-                Key.OemCloseBrackets when shift => '}',
-                Key.OemCloseBrackets => ']',
+                Key.OemCloseBrackets when shift => '}', 
+                Key.OemCloseBrackets => ']',   
                 Key.OemQuotes when shift => '"',   // Shift+" = "
                 Key.OemQuotes => '\'',  // ' без Shift = '
                 _ => null
@@ -627,6 +649,17 @@ namespace CodeTypingTrainer
 
                 _session.CurrentInput = _userInput;
                 _session.CaretPosition = _userInput.Length;
+                _session.TotalKeystrokes = _userInput.Length;
+
+                int errors = 0;
+                for (int i = 0; i < _userInput.Length && i < target.Length; i++)
+                    if (_userInput[i] != target[i]) errors++;
+
+                for (int i = 0; i < _userInput.Length && i < target.Length; i++)
+                {
+                    if (_userInput[i] != target[i])
+                        _session.RegisterErrorAtPosition(i, target[i]);
+                }
 
                 AccuracyText.Text = $"{_session.Accuracy}%";
                 _highlight.UpdateHighlight(CodeDisplay, target, _userInput, _userInput.Length);
@@ -655,37 +688,32 @@ namespace CodeTypingTrainer
             string input = InputBox.Text;
             int caret = InputBox.CaretIndex;
 
-            // _userInput = только символы до курсора — автовставки стоят после курсора
             _userInput = input.Substring(0, Math.Min(caret, input.Length));
 
             _session.CurrentInput = _userInput;
             _session.CaretPosition = _userInput.Length;
+            _session.TotalKeystrokes = _userInput.Length;
 
-            // Точность считаем по _userInput
-            if (_session.AccuracyMode == AccuracyMode.Cumulative)
+            // Считаем накопительные ошибки и регистрируем их в CharErrors одновременно
+            // Проверяем КАЖДУЮ позицию текущего ввода — если на ней неверный символ,
+            // регистрируем ошибку на этой позиции (один раз навсегда, независимо от исправлений)
+            for (int i = 0; i < _userInput.Length && i < target.Length; i++)
             {
-                _session.TotalKeystrokes = _userInput.Length;
-                int errors = 0;
-                for (int i = 0; i < _userInput.Length && i < target.Length; i++)
-                    if (_userInput[i] != target[i]) errors++;
-                if (errors > _session.CumulativeErrors)
-                {
-                    if (_userInput.Length <= target.Length)
-                        _session.RegisterError(target[_userInput.Length - 1]);
-                    _session.CumulativeErrors = errors;
-                }
+                if (_userInput[i] != target[i])
+                    _session.RegisterErrorAtPosition(i, target[i]);
             }
 
             AccuracyText.Text = $"{_session.Accuracy}%";
 
-            // Подсветка — передаём _userInput и его длину как позицию курсора
             _highlight.UpdateHighlight(CodeDisplay, target, _userInput, _userInput.Length);
             ScrollToCurrentPosition(_userInput.Length);
+
+            // Показываем подсказку — следующая клавиша или Backspace если есть ошибка
+            UpdateKeyboardHint();
 
             if (_suggestionsEnabled)
                 UpdateSuggestions(input);
 
-            // Завершение — сравниваем _userInput с эталоном
             if (_userInput.Length >= target.Length && _userInput == target)
                 FinishSession();
         }
@@ -883,7 +911,14 @@ namespace CodeTypingTrainer
         // -------------------------------------------------------
         private void FinishSession()
         {
+            _onScreenKeyboard.ClearHint();
             _timer.Stop();
+
+            // Считаем финальные метрики ДО того как IsActive станет false —
+            // иначе WPM всегда будет вычисляться как 0
+            int finalWpm = _session.WPM;
+            double finalAccuracy = _session.Accuracy;
+
             _session.IsActive = false;
             InputBox.IsEnabled = false;
             PauseButton.IsEnabled = false;
@@ -896,8 +931,70 @@ namespace CodeTypingTrainer
             _highlight.SetCompleted(CodeDisplay, _session.Snippet.Code);
 
             TimeSpan elapsed = DateTime.Now - _session.StartTime;
-            StatusText.Text = $"✅ Готово!  WPM: {_session.WPM}  |  Точность: {_session.Accuracy}%  |  Время: {elapsed.Minutes}:{elapsed.Seconds:D2}";
             StartButton.IsEnabled = true;
+
+            SaveCompletedSession(elapsed, finalWpm, finalAccuracy);
+        }
+
+        // Сохранение завершённой сессии на диск
+        private void SaveCompletedSession(TimeSpan elapsed, int finalWpm, double finalAccuracy)
+        {
+            // Считаем реальное количество ошибок для этой сессии независимо от режима точности —
+            // сравниваем финальный ввод с эталоном посимвольно
+            int actualErrorCount = CountActualErrors();
+
+            var record = new SessionRecord
+            {
+                Timestamp = DateTime.Now,
+                Language = _session.Snippet.Language,
+                SnippetTitle = _session.Snippet.Title,
+                Difficulty = _session.Snippet.Difficulty,
+                WPM = finalWpm,
+                Accuracy = finalAccuracy,
+                DurationSeconds = (int)elapsed.TotalSeconds,
+                ErrorCount = actualErrorCount,
+                Mode = _isAudioMode ? "Audio" : "Normal"
+            };
+
+            _storage.SaveSessionRecord(record);
+
+            _profile.ApplySession(record, _session.TotalKeystrokes, _session.CharErrors);
+            _storage.SaveProfile(_profile);
+        }
+
+        // Считает реальное количество ошибок независимо от режима точности —
+        // используется только для статистики, не влияет на сам Accuracy
+        private int CountActualErrors()
+        {
+            return _session.CumulativeErrors;
+        }
+
+        // Сохранение завершённой сессии на диск
+        private void SaveCompletedSession(TimeSpan elapsed)
+        {
+            var record = new SessionRecord
+            {
+                Timestamp = DateTime.Now,
+                Language = _session.Snippet.Language,
+                SnippetTitle = _session.Snippet.Title,
+                Difficulty = _session.Snippet.Difficulty,
+                WPM = _session.WPM,
+                Accuracy = _session.Accuracy,
+                DurationSeconds = (int)elapsed.TotalSeconds,
+                ErrorCount = _session.CumulativeErrors,
+                Mode = _isAudioMode ? "Audio" : "Normal"
+            };
+
+            _storage.SaveSessionRecord(record);
+
+            _profile.ApplySession(record, _session.TotalKeystrokes, _session.CharErrors);
+            _storage.SaveProfile(_profile);
+        }
+
+        private void MainWindow_Closing(object sender, System.ComponentModel.CancelEventArgs e)
+        {
+            // Сохраняем профиль на случай если он не был сохранён после последней сессии
+            _storage.SaveProfile(_profile);
         }
 
         // -------------------------------------------------------
@@ -913,7 +1010,6 @@ namespace CodeTypingTrainer
                 InputBox.IsEnabled = false;
                 SuggestionsPopup.IsOpen = false;
                 PauseButton.Content = "▶ Продолжить";
-                StatusText.Text = "Пауза.";
             }
             else
             {
@@ -922,7 +1018,6 @@ namespace CodeTypingTrainer
                 InputBox.IsEnabled = true;
                 InputBox.Focus();
                 PauseButton.Content = "⏸ Пауза";
-                StatusText.Text = $"Набираем: {_session.Snippet.Title}";
             }
         }
 
@@ -931,6 +1026,7 @@ namespace CodeTypingTrainer
         // -------------------------------------------------------
         private void RestartButton_Click(object sender, RoutedEventArgs e)
         {
+            _onScreenKeyboard.ClearHint();
             _speech.StopAll();
             _timer.Stop();
             // Сначала сохраняем код текущего фрагмента (если есть), затем обнуляем сессию
@@ -954,7 +1050,6 @@ namespace CodeTypingTrainer
             // Если был код фрагмента — отобразим его как завершённый, иначе оставим подсказку
             if (!string.IsNullOrEmpty(snippetCode))
                 _highlight.SetCompleted(CodeDisplay, snippetCode);
-            StatusText.Text = "Готов к работе.";
         }
 
         // -------------------------------------------------------
@@ -993,7 +1088,6 @@ namespace CodeTypingTrainer
                 "Audio" => "На слух",
                 _ => "Неизвестный режим"
             };
-            StatusText.Text = $"Выбран режим: {modeText}. Нажмите «Старт».";
         }
 
         private void ThemeButton_Click(object sender, RoutedEventArgs e)
@@ -1003,18 +1097,15 @@ namespace CodeTypingTrainer
 
         private async void TestTts_Click(object sender, RoutedEventArgs e)
         {
-            StatusText.Text = "Отправляю запрос к Google TTS...";
 
             var (audioData, error) = await _googleTts.SynthesizeAsync("Привет, это тест синтеза речи");
 
             if (error != null)
             {
-                StatusText.Text = $"Ошибка: {error}";
                 MessageBox.Show(error, "Ошибка TTS", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
 
-            StatusText.Text = $"Успех! Получено {audioData.Length} байт аудио.";
 
             // Сохраняем во временный файл и проигрываем системным плеером
             string tempPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "tts_test.wav");
@@ -1053,5 +1144,319 @@ namespace CodeTypingTrainer
 
             return ms.ToArray();
         }
+
+
+        private void InputBox_PreviewTextInput(object sender, System.Windows.Input.TextCompositionEventArgs e)
+        {
+            if (string.IsNullOrEmpty(e.Text)) return;
+
+            char typedChar = e.Text[0];
+
+            // Снимаем подсветку с предыдущей клавиши немедленно
+            if (_lastHighlightedKey.HasValue)
+                _onScreenKeyboard.ResetKey(_lastHighlightedKey.Value);
+
+            _onScreenKeyboard.HighlightKey(typedChar);
+            _lastHighlightedKey = typedChar;
+
+            _keyReleaseTimer.Stop();
+            _keyReleaseTimer.Start();
+        }
+
+        // -------------------------------------------------------
+        // НАВИГАЦИЯ ПО ВКЛАДКАМ
+        // -------------------------------------------------------
+        private void TabTraining_Click(object sender, RoutedEventArgs e)
+        {
+            TrainingTab.Visibility = Visibility.Visible;
+            StatsTab.Visibility = Visibility.Collapsed;
+            SetActiveTab(TabTrainingButton);
+        }
+
+        private void TabStats_Click(object sender, RoutedEventArgs e)
+        {
+            TrainingTab.Visibility = Visibility.Collapsed;
+            StatsTab.Visibility = Visibility.Visible;
+            SetActiveTab(TabStatsButton);
+            LoadStatsTab();
+        }
+
+        private void SetActiveTab(Button active)
+        {
+            TabTrainingButton.BorderBrush = new SolidColorBrush(Colors.Transparent);
+            TabTrainingButton.Foreground = new SolidColorBrush(Color.FromRgb(0x6C, 0x70, 0x86));
+            TabStatsButton.BorderBrush = new SolidColorBrush(Colors.Transparent);
+            TabStatsButton.Foreground = new SolidColorBrush(Color.FromRgb(0x6C, 0x70, 0x86));
+
+            active.BorderBrush = new SolidColorBrush(Color.FromRgb(0x89, 0xB4, 0xFA));
+            active.Foreground = new SolidColorBrush(Color.FromRgb(0xCD, 0xD6, 0xF4));
+        }
+
+        // -------------------------------------------------------
+        // СВОРАЧИВАНИЕ БОКОВОЙ ПАНЕЛИ
+        // -------------------------------------------------------
+        private void CollapsePanel_Click(object sender, RoutedEventArgs e)
+        {
+            _sidePanelCollapsed = !_sidePanelCollapsed;
+
+            if (_sidePanelCollapsed)
+            {
+                SidePanelColumn.Width = new GridLength(40);
+                SidePanelContent.Visibility = Visibility.Collapsed;
+                SideModeLabel.Visibility = Visibility.Collapsed;
+                SideLangLabel.Visibility = Visibility.Collapsed;
+                CollapseButton.Content = "▶";
+            }
+            else
+            {
+                SidePanelColumn.Width = new GridLength(180);
+                SidePanelContent.Visibility = Visibility.Visible;
+                SideModeLabel.Visibility = Visibility.Visible;
+                SideLangLabel.Visibility = Visibility.Visible;
+                CollapseButton.Content = "≡";
+            }
+        }
+
+        // -------------------------------------------------------
+        // ВКЛАДКА СТАТИСТИКИ
+        // -------------------------------------------------------
+        private void LoadStatsTab()
+        {
+            var profile = _storage.LoadProfile();
+            var sessions = _storage.LoadAllSessions();
+
+            // Сводка
+            TotalSessionsText.Text = profile.TotalSessions.ToString();
+            BestWpmText.Text = profile.BestWPM.ToString("0");
+            AvgAccuracyText.Text = $"{profile.AverageAccuracy:0.0}%";
+            TotalKeystrokesText.Text = profile.TotalKeystrokes.ToString();
+
+            // График
+            var points = _statsAggregator.BuildProgressPoints(sessions);
+            ProgressChartCanvas.Loaded += (s, e) => DrawProgressChart(points);
+            if (ProgressChartCanvas.ActualWidth > 0)
+                DrawProgressChart(points);
+
+            // Тепловая карта
+            var intensity = _statsAggregator.NormalizeErrorIntensity(profile.CharErrors);
+            DrawHeatmapKeyboard(intensity);
+        }
+
+        private void DrawProgressChart(List<StatsAggregationService.ProgressPoint> points)
+        {
+            ProgressChartCanvas.Children.Clear();
+            if (points.Count == 0)
+            {
+                var t = new TextBlock
+                {
+                    Text = "Нет данных — завершите хотя бы одну тренировку.",
+                    Foreground = new SolidColorBrush(Color.FromRgb(0x6C, 0x70, 0x86)),
+                    FontSize = 13
+                };
+                Canvas.SetLeft(t, 12); Canvas.SetTop(t, 80);
+                ProgressChartCanvas.Children.Add(t);
+                return;
+            }
+
+            double w = ProgressChartCanvas.ActualWidth > 0 ? ProgressChartCanvas.ActualWidth : 860;
+            double h = ProgressChartCanvas.ActualHeight > 0 ? ProgressChartCanvas.ActualHeight : 200;
+            double pad = 28;
+            double maxWpm = System.Math.Max(points.Max(p => p.WPM), 10);
+            double stepX = points.Count > 1 ? (w - 2 * pad) / (points.Count - 1) : 0;
+
+            var wpmPts = new PointCollection();
+            var accPts = new PointCollection();
+
+            for (int i = 0; i < points.Count; i++)
+            {
+                double x = pad + i * stepX;
+                wpmPts.Add(new Point(x, h - pad - (points[i].WPM / maxWpm) * (h - 2 * pad)));
+                accPts.Add(new Point(x, h - pad - (points[i].Accuracy / 100.0) * (h - 2 * pad)));
+            }
+
+            ProgressChartCanvas.Children.Add(new Polyline
+            {
+                Points = wpmPts,
+                Stroke = new SolidColorBrush(Color.FromRgb(0xA6, 0xE3, 0xA1)),
+                StrokeThickness = 2
+            });
+            ProgressChartCanvas.Children.Add(new Polyline
+            {
+                Points = accPts,
+                Stroke = new SolidColorBrush(Color.FromRgb(0x89, 0xB4, 0xFA)),
+                StrokeThickness = 2
+            });
+
+            foreach (var p in wpmPts) AddChartDot(p, Color.FromRgb(0xA6, 0xE3, 0xA1));
+            foreach (var p in accPts) AddChartDot(p, Color.FromRgb(0x89, 0xB4, 0xFA));
+        }
+
+        private void AddChartDot(Point p, Color c)
+        {
+            var dot = new Ellipse { Width = 6, Height = 6, Fill = new SolidColorBrush(c) };
+            Canvas.SetLeft(dot, p.X - 3); Canvas.SetTop(dot, p.Y - 3);
+            ProgressChartCanvas.Children.Add(dot);
+        }
+
+        private void DrawHeatmapKeyboard(Dictionary<char, double> intensity)
+        {
+            // Переиспользуем тот же подход что в StatsWindow — но рисуем на KeyboardCanvas
+            KeyboardCanvas.Children.Clear();
+            var rows = _keyboardLayout.GetRows();
+            double keySize = 56, gap = 6, y = 0;
+
+            foreach (var row in rows)
+            {
+                double x = 0;
+                if (row == rows[1]) x = keySize * 0.4;
+                else if (row == rows[2]) x = keySize * 0.7;
+                else if (row == rows[3]) x = keySize * 1.0;
+
+                foreach (var key in row)
+                {
+                    DrawHeatmapKey(key, x, y, keySize, keySize, intensity);
+                    x += keySize + gap;
+                }
+                y += keySize + gap;
+            }
+        }
+
+        private void DrawHeatmapKey(KeyDefinition key, double x, double y,
+            double width, double height, Dictionary<char, double> intensity)
+        {
+            Color Interp(double level)
+            {
+                var b = Color.FromRgb(0x31, 0x32, 0x44);
+                var e = Color.FromRgb(0xF3, 0x8B, 0xA8);
+                return Color.FromRgb(
+                    (byte)(b.R + (e.R - b.R) * level),
+                    (byte)(b.G + (e.G - b.G) * level),
+                    (byte)(b.B + (e.B - b.B) * level));
+            }
+
+            var border = new Border
+            {
+                Width = width,
+                Height = height,
+                CornerRadius = new CornerRadius(6),
+                Background = new SolidColorBrush(Color.FromRgb(0x31, 0x32, 0x44)),
+                ClipToBounds = true
+            };
+            Canvas.SetLeft(border, x); Canvas.SetTop(border, y);
+
+            if (key.IsSplit)
+            {
+                var grid = new Grid();
+                grid.RowDefinitions.Add(new RowDefinition());
+                grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(2) });
+                grid.RowDefinitions.Add(new RowDefinition());
+
+                Border Half(char c, bool top)
+                {
+                    double lv = intensity.TryGetValue(c, out var v) ? v : 0;
+                    var h = new Border
+                    {
+                        Background = new SolidColorBrush(Interp(lv)),
+                        CornerRadius = top ? new CornerRadius(6, 6, 0, 0) : new CornerRadius(0, 0, 6, 6)
+                    };
+                    h.Child = new TextBlock
+                    {
+                        Text = char.IsLetterOrDigit(c) ? c.ToString().ToUpper() : c.ToString(),
+                        Foreground = new SolidColorBrush(Color.FromRgb(0xCD, 0xD6, 0xF4)),
+                        FontWeight = FontWeights.Bold,
+                        FontSize = 12,
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center
+                    };
+                    return h;
+                }
+
+                var top = Half(key.TopChar.Value, true);
+                var bot = Half(key.BottomChar.Value, false);
+                Grid.SetRow(top, 0); Grid.SetRow(bot, 2);
+                grid.Children.Add(top); grid.Children.Add(bot);
+                border.Child = grid;
+            }
+            else
+            {
+                char c = key.BottomChar ?? ' ';
+                double lv = intensity.TryGetValue(c, out var v) ? v : 0;
+                border.Background = new SolidColorBrush(Interp(lv));
+                border.Child = new TextBlock
+                {
+                    Text = c.ToString().ToUpper(),
+                    Foreground = new SolidColorBrush(Color.FromRgb(0xCD, 0xD6, 0xF4)),
+                    FontWeight = FontWeights.Bold,
+                    FontSize = 17,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+            }
+
+            KeyboardCanvas.Children.Add(border);
+        }
+
+        private void ClearStatsButton_Click(object sender, RoutedEventArgs e)
+        {
+            var result = MessageBox.Show(
+                "Удалить всю статистику?\n\nИсторию сессий, рекорды и тепловую карту нельзя восстановить.",
+                "Подтверждение",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning,
+                MessageBoxResult.No);
+
+            if (result != MessageBoxResult.Yes) return;
+
+            _storage.ClearAllData();
+            _profile = _storage.LoadProfile();
+            LoadStatsTab();
+        }
+
+        private void UpdateKeyboardHint()
+        {
+            if (_session == null || !_session.IsActive) return;
+
+            string target = _session.Snippet.Code;
+
+            bool hasError = _userInput.Length > 0
+                && _userInput.Length <= target.Length
+                && _userInput[_userInput.Length - 1] != target[_userInput.Length - 1];
+
+            if (hasError)
+            {
+                _onScreenKeyboard.ShowHintForSpecial(Services.SpecialKeyType.Backspace);
+                return;
+            }
+
+            int nextPos = _userInput.Length;
+            if (nextPos >= target.Length)
+            {
+                _onScreenKeyboard.ClearHint();
+                return;
+            }
+
+            char next = target[nextPos];
+
+            if (next == '\n')
+            {
+                _onScreenKeyboard.ShowHintForSpecial(Services.SpecialKeyType.Enter);
+            }
+            else if (next == '\t')
+            {
+                _onScreenKeyboard.ShowHintForSpecial(Services.SpecialKeyType.Tab);
+            }
+            else
+            {
+                _onScreenKeyboard.ShowHintForChar(next);
+            }
+        }
+
+        // Фильтры периода
+        private void FilterAll_Click(object sender, RoutedEventArgs e) => LoadStatsTab();
+        private void FilterWeek_Click(object sender, RoutedEventArgs e) => LoadStatsTab();
+        private void FilterToday_Click(object sender, RoutedEventArgs e) => LoadStatsTab();
+
+        private void ThemeLight_Click(object sender, RoutedEventArgs e) { }
+        private void ThemeDark_Click(object sender, RoutedEventArgs e) { }
     }
 }

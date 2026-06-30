@@ -1,5 +1,7 @@
-﻿using CodeTypingTrainer.Models;
+﻿using System.Collections.Generic;
 using System.Text.RegularExpressions;
+using CodeTypingTrainer.Models;
+using System.Linq;
 
 namespace CodeTypingTrainer.Services.CodeNarrators
 {

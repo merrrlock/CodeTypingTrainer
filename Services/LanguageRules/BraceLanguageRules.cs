@@ -1,4 +1,6 @@
-﻿namespace CodeTypingTrainer.Services.LanguageRules
+﻿using System.Collections.Generic;
+
+namespace CodeTypingTrainer.Services.LanguageRules
 {
     // Базовый класс для языков с блоками через {}
     // Наследуют: JavaScript, C++, Java, Go

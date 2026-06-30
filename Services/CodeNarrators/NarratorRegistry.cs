@@ -1,4 +1,6 @@
-﻿namespace CodeTypingTrainer.Services.CodeNarrators
+﻿using System.Collections.Generic;
+
+namespace CodeTypingTrainer.Services.CodeNarrators
 {
     // Хранит нарраторов для всех языков, выдаёт нужный по имени
     public class NarratorRegistry

@@ -1,4 +1,6 @@
-﻿namespace CodeTypingTrainer.Services
+﻿using System.Collections.Generic;
+
+namespace CodeTypingTrainer.Services
 {
     public class AutoCompleteService
     {
